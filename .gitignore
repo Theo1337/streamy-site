@@ -1,0 +1,15 @@
+# Node
+node_modules/
+package-lock.json
+
+# Wrangler
+.wrangler/
+dist/
+.dev.vars
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini

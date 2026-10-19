@@ -1,0 +1,3 @@
+# Keep line endings normalised in the repository regardless of the OS that
+# clones it.
+* text=auto eol=lf
