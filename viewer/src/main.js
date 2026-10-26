@@ -22,6 +22,7 @@ const dom = {
   manual: document.querySelector("#manual"),
   manualToggle: document.querySelector("#manual-toggle"),
   reconnect: document.querySelector("#reconnect"),
+  downloadBtn: document.querySelector("#download-btn"),
   lobbyEmpty: document.querySelector("#lobby-empty"),
   count: document.querySelector("#count"),
   workspace: document.querySelector("#workspace"),
@@ -119,6 +120,10 @@ async function loadConfig() {
   try {
     const response = await fetch("./config.json", { cache: "no-store" });
     if (response.ok) config = await response.json();
+    // Apply download URL from config to the download button
+    if (dom.downloadBtn && config.downloadURL) {
+      dom.downloadBtn.href = config.downloadURL;
+    }
   } catch {
     // A missing config is fine: the built-in signaling URL still works.
   }

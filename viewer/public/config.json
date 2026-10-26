@@ -1,3 +1,4 @@
 {
-  "signalURL": "wss://streamy-signal.thenightserver.workers.dev"
+  "signalURL": "wss://streamy-signal.thenightserver.workers.dev",
+  "downloadURL": "https://github.com/OWNER/REPO/releases/latest/download/Streamy-Setup.exe"
 }
