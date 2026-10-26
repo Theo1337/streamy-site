@@ -126,18 +126,26 @@ async function loadConfig() {
 
   // Fetch latest release from GitHub to construct download URL dynamically
   // Pattern: https://github.com/Theo1337/streamy-app/releases/download/v{version}/Streamy-Setup.exe
+  // Note: /releases/latest excludes pre-releases, so we use /releases and filter
   try {
     const repo = "Theo1337/streamy-app";
-    const releaseResponse = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    const releaseResponse = await fetch(`https://api.github.com/repos/${repo}/releases`, {
       headers: { "Accept": "application/vnd.github.v3+json" },
       cache: "no-store"
     });
     if (releaseResponse.ok) {
-      const release = await releaseResponse.json();
-      const version = release.tag_name.replace(/^v/, ""); // Remove 'v' prefix if present
-      const downloadURL = `https://github.com/${repo}/releases/download/v${version}/Streamy-Setup.exe`;
-      if (dom.downloadBtn) {
-        dom.downloadBtn.href = downloadURL;
+      const releases = await releaseResponse.json();
+      // Find the latest non-draft release (including pre-releases)
+      const release = releases.find(r => !r.draft);
+      if (release) {
+        const version = release.tag_name.replace(/^v/, ""); // Remove 'v' prefix if present
+        const downloadURL = `https://github.com/${repo}/releases/download/v${version}/Streamy-Setup.exe`;
+        if (dom.downloadBtn) {
+          dom.downloadBtn.href = downloadURL;
+        }
+      } else if (config.downloadURL && dom.downloadBtn) {
+        // Fallback to config.json downloadURL if no releases found
+        dom.downloadBtn.href = config.downloadURL;
       }
     } else if (config.downloadURL && dom.downloadBtn) {
       // Fallback to config.json downloadURL if GitHub API fails
