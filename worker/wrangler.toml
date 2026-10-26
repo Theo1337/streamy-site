@@ -1,0 +1,28 @@
+name = "streamy-signal"
+main = "src/index.js"
+compatibility_date = "2026-10-19"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[durable_objects.bindings]]
+name = "LOBBY"
+class_name = "Lobby"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Lobby"]
+
+[vars]
+MAX_VIEWERS = "10"
+HOST_GRACE_SECONDS = "30"
+VIEWER_ORIGINS = "https://master.streamy-viewer.pages.dev,https://streamy-viewer.pages.dev,https://2ef2b16d.streamy-viewer.pages.dev,http://127.0.0.1:8787,http://localhost:8787"
+DISCORD_CLIENT_ID = "1539962249718792203"
+
+[dev]
+port = 8788

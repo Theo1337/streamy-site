@@ -1,25 +1,45 @@
-# viewer/ (phase 6)
+# viewer/
 
-The static viewer page: plain HTML, CSS and JavaScript, no framework and no build
-step, so it can be dropped straight into Cloudflare Pages.
+Vite single-page app for the public Streamy lobby and WebRTC player.
 
-## Planned contents
+The page lists active public streams, opens the first one muted, and provides
+custom playback, audio, fullscreen, reconnect, and manual SDP diagnostics
+(`?manual=1`).
 
-| File | Purpose |
+## Files
+
+| Path | Purpose |
 | --- | --- |
-| `index.html` | The page: one `<video>` element, a status line, a fullscreen button, a reconnect button |
-| `app.js` | Reads `room`, `token` and `signal` from `location.hash`, connects to the Worker, answers the host's offers, plays the stream |
-| `style.css` | Responsive layout that works on a phone (this is the main way people will watch) |
-| `_headers` | A Content-Security-Policy and cache headers for Pages |
+| `index.html` | Lobby, player, and manual offer/answer controls |
+| `src/main.js` | Routing (direct WebRTC and lobby), controls, `window.Streamy` API |
+| `src/lobby.js` | Lobby rendering and selection |
+| `src/transports/transport.js` | Shared `Transport` interface |
+| `src/transports/webrtc.js` | WebRTC viewer transport |
+| `public/config.json` | Default signaling URL used by the lobby and direct links |
 
-## Planned deploy
+## Local development
 
 ```powershell
-npx wrangler pages deploy viewer --project-name streamy-viewer
+cd stream-site/viewer
+npm install
+npm run dev
 ```
 
-The Worker URL is baked into `app.js` as a default and can be overridden per link
-with the `signal` fragment parameter — see `PROTOCOL.md`.
+The development server runs on <http://127.0.0.1:8787>. Add that origin to
+`VIEWER_ORIGINS` in `worker/wrangler.toml` if the lobby request is rejected.
 
-Nothing is deployed yet. This placeholder exists so the folder layout matches the
-project plan from the start.
+## Deploy
+
+```powershell
+npm run deploy
+```
+
+This builds `dist/` and publishes it to the `streamy-viewer` Cloudflare Pages
+project. The signaling Worker URL can be overridden per direct link with
+`?signal=wss://...`.
+
+## Direct links
+
+- `?room=<room>&token=<host-token>` opens one WebRTC room.
+- `?manual=1` shows the manual SDP diagnostics panel.
+- `?room=...&token=...&ice=<json>` overrides the ICE server list.

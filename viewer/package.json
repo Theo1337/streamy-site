@@ -1,0 +1,15 @@
+{
+  "name": "streamy-viewer",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && npx wrangler pages deploy dist --project-name streamy-viewer --branch master"
+  },
+  "devDependencies": {
+    "vite": "^8.3.4"
+  }
+}
