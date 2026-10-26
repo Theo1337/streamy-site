@@ -143,13 +143,21 @@ export function installLobby() {
       </div>`;
   }
 
+  function switchButtonHTML(stream) {
+    return `
+      <div class="switch-button">
+        <span>Switch to ${escapeHTML(stream.name)}</span>
+        ${icon("radio", "sm")}
+      </div>`;
+  }
+
   function cardHTML(stream, variant) {
     const isActive = variant === "card--active";
     return `
       <article class="card ${variant}" data-room="${escapeHTML(stream.room || "")}" data-name="${escapeHTML(stream.name)}">
         ${isActive ? '<div class="card-media" id="card-media"></div>' : tileContentHTML(stream)}
         ${overlayHTML(stream)}
-        ${isActive ? controlsHTML(stream) : ""}
+        ${isActive ? controlsHTML(stream) : switchButtonHTML(stream)}
       </article>`;
   }
 

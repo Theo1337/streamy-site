@@ -120,12 +120,34 @@ async function loadConfig() {
   try {
     const response = await fetch("./config.json", { cache: "no-store" });
     if (response.ok) config = await response.json();
-    // Apply download URL from config to the download button
-    if (dom.downloadBtn && config.downloadURL) {
+  } catch {
+    // A missing config is fine: the built-in signaling URL still works.
+  }
+
+  // Fetch latest release from GitHub to construct download URL dynamically
+  // Pattern: https://github.com/Theo1337/streamy-app/releases/download/v{version}/Streamy-Setup.exe
+  try {
+    const repo = "Theo1337/streamy-app";
+    const releaseResponse = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+      headers: { "Accept": "application/vnd.github.v3+json" },
+      cache: "no-store"
+    });
+    if (releaseResponse.ok) {
+      const release = await releaseResponse.json();
+      const version = release.tag_name.replace(/^v/, ""); // Remove 'v' prefix if present
+      const downloadURL = `https://github.com/${repo}/releases/download/v${version}/Streamy-Setup.exe`;
+      if (dom.downloadBtn) {
+        dom.downloadBtn.href = downloadURL;
+      }
+    } else if (config.downloadURL && dom.downloadBtn) {
+      // Fallback to config.json downloadURL if GitHub API fails
       dom.downloadBtn.href = config.downloadURL;
     }
   } catch {
-    // A missing config is fine: the built-in signaling URL still works.
+    // Fallback to config.json downloadURL if GitHub API fails
+    if (config.downloadURL && dom.downloadBtn) {
+      dom.downloadBtn.href = config.downloadURL;
+    }
   }
 }
 

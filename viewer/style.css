@@ -241,6 +241,32 @@ p { margin: 0; }
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.2), 0 8px 16px rgba(0, 0, 0, 0.4);
 }
 
+/* Switch button on tile hover */
+.switch-button {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: linear-gradient(to bottom, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0.8));
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.switch-button svg {
+  width: 20px;
+  height: 20px;
+  color: #6366f1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+.card--tile:hover .switch-button {
+  opacity: 1;
+}
+
 /* ---------- persistent player container & video ---------- */
 .card-media {
   flex: 1;
