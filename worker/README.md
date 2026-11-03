@@ -14,6 +14,7 @@ SDP/ICE messages. Media remains peer-to-peer. See
 | `src/room.js` | Room auth, peer registry, relay, viewer cap, alarms and per-socket rate limiting |
 | `src/lobby.js` | Public active-stream registry and one-time Discord OAuth state |
 | `src/identity.js` | Discord identity token signing and callback validation |
+| `src/tunnel.js` | Stable front door: proxies `/token`, `/api/*` and relay WebSockets to the current quick tunnel |
 | `src/protocol.js` | Versioned protocol helpers and security/limit primitives |
 | `package.json` | Wrangler and local test/deploy scripts |
 | `test/` | Protocol, token, origin and limit tests |
@@ -45,8 +46,9 @@ cd stream-site/viewer
 npm run deploy
 ```
 
-`npm run deploy` builds `dist/` and uploads it to Cloudflare Pages. Deploy the
-built output, not the source directory.
+`npm run deploy` builds `dist/` and uploads it to Cloudflare Pages. Deploying
+`viewer/` itself serves unbundled `/src/main.js`, which fails in the Activity
+with `Failed to resolve module specifier "@discord/embedded-app-sdk"`.
 
 ### Enable public lobby and Discord sign-in
 
@@ -76,7 +78,40 @@ It exposes the streamer's Discord display name/avatar, viewer count, and a
 separate viewer-only room token for currently live rooms. It does not expose
 the host's private room token or collect viewer names.
 
-## Bundle check
+## Stable front door for the self-hosted relay (`/token`, `/relay`)
+
+The Worker can also stand in front of a self-hosted relay and bot, so the Discord
+Developer Portal never has to change when a quick tunnel restarts.
+
+| Route | Forwarded to | Used by |
+| --- | --- | --- |
+| `POST /token`, `/api/token` | `https://<tunnel>/token` | Activity token exchange |
+| `GET /v1/publish/*`, `/v1/watch/*` | `https://<tunnel>/v1/...` | relay WebSocket (publisher / viewer) |
+| `/relay/*` | `https://<tunnel>/...` | same, if a mapping keeps its prefix |
+
+The current tunnel hostname lives in the `Lobby` Durable Object (key
+`tunnel_host`), so lookups are strongly consistent. It is managed through an
+authenticated endpoint:
+
+```powershell
+npx wrangler secret put TUNNEL_ADMIN_TOKEN        # once
+
+$t = Get-Content ..\dev\secrets\tunnel-admin-token.txt -Raw
+Invoke-RestMethod "https://streamy-signal.thenightserver.workers.dev/__tunnel" `
+  -Method Put -Headers @{ Authorization = "Bearer $t" } `
+  -ContentType "application/json" -Body '{"host":"abc-123.trycloudflare.com"}'
+
+# inspect / clear
+Invoke-RestMethod "https://streamy-signal.thenightserver.workers.dev/__tunnel" -Headers @{ Authorization = "Bearer $t" }
+Invoke-RestMethod "https://streamy-signal.thenightserver.workers.dev/__tunnel" -Method Delete -Headers @{ Authorization = "Bearer $t" }
+```
+
+`dev\start-activity.ps1` does the `Put` automatically after each tunnel start and
+the `Delete` on `-Stop`. When no host is stored the proxy answers
+`503 {"error":"relay-offline"}` instead of hanging. WebSockets are passed through
+with `fetch()`, so media frames are bridged by the runtime, not by JavaScript —
+there is no per-message CPU cost. Only the initial connection and the token
+exchange count as Worker requests.
 
 For a bundle check without publishing, run `npx wrangler deploy --dry-run`.
 `ICE_SERVERS_JSON` can be set with `wrangler secret put ICE_SERVERS_JSON`;

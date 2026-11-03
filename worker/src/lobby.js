@@ -37,6 +37,27 @@ export class Lobby {
       await this.state.storage.delete(`stream:${room}`);
       return new Response(null, { status: 204 });
     }
+    if (url.pathname === "/tunnel") {
+      if (request.method === "GET") {
+        const host = (await this.state.storage.get("tunnel_host")) || "";
+        return Response.json({ host, updatedAt: (await this.state.storage.get("tunnel_host_at")) || 0 });
+      }
+      if (request.method === "PUT") {
+        const data = await request.json();
+        const host = typeof data?.host === "string" ? data.host.trim() : "";
+        if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+(:\d{1,5})?$/i.test(host) || host.length > 253) {
+          return new Response("invalid host", { status: 400 });
+        }
+        await this.state.storage.put("tunnel_host", host);
+        await this.state.storage.put("tunnel_host_at", Date.now());
+        return new Response(null, { status: 204 });
+      }
+      if (request.method === "DELETE") {
+        await this.state.storage.delete("tunnel_host");
+        await this.state.storage.delete("tunnel_host_at");
+        return new Response(null, { status: 204 });
+      }
+    }
     if (url.pathname === "/oauth/states" && request.method === "POST") {
       const data = await request.json();
       if (typeof data.state !== "string" || data.state.length < 32 ||

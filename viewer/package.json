@@ -9,6 +9,9 @@
     "preview": "vite preview",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name streamy-viewer --branch master"
   },
+  "dependencies": {
+    "@discord/embedded-app-sdk": "^2.5.0"
+  },
   "devDependencies": {
     "vite": "^8.3.4"
   }

@@ -216,6 +216,7 @@ p { margin: 0; }
   display: flex;
   flex-direction: column;
   background: #000;
+  border-radius: 0;
 }
 
 .card--active:fullscreen,
@@ -256,6 +257,7 @@ p { margin: 0; }
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.15s ease;
+  z-index: 5;
 }
 .switch-button svg {
   width: 20px;
@@ -305,9 +307,28 @@ p { margin: 0; }
   object-position: center;
   display: block;
   background: #000;
+  border: none;
+  outline: none;
 }
 
 .player-container video[hidden] {
+  display: none !important;
+}
+
+.video-canvas {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  background: transparent;
+}
+
+.video-canvas[hidden] {
   display: none !important;
 }
 
@@ -514,20 +535,28 @@ img.streamer-avatar {
 /* ---------- player-only layout (cinema mode) ---------- */
 /* Cinema mode gives the video the whole page: the top bar, notices, badges and
    other streams only cover the picture. */
+body.activity,
 body.cinema { background: #000; }
 
+body.activity .topbar,
 body.cinema .topbar,
+body.activity .viewer-notice,
 body.cinema .viewer-notice,
+body.activity .overlay,
 body.cinema .overlay,
+body.activity .lobby-empty,
 body.cinema .lobby-empty { display: none !important; }
 
+body.activity .workspace,
 body.cinema .workspace,
+body.activity .stage,
 body.cinema .stage {
   max-width: none;
   padding: 0;
   gap: 0;
 }
 
+body.activity .card--active,
 body.cinema .card--active {
   border-radius: 0;
   box-shadow: none;
@@ -535,19 +564,25 @@ body.cinema .card--active {
 
 /* Other live streams stay in the lobby; they must not steal height from the
    one stream this page exists to show. */
+body.activity .grid--strip,
 body.cinema .grid--strip { display: none; }
 
 /* The video controls stay available: they fade in when the pointer moves and
    out again after a few idle seconds (main.js toggles body.idle). */
+body.activity .controls,
 body.cinema .controls { opacity: 1; visibility: visible; }
 
+body.activity.idle .controls,
 body.cinema.idle .controls { opacity: 0; visibility: hidden; }
 
+body.activity.idle,
 body.cinema.idle { cursor: none; }
 
 @media (hover: none) {
   /* A touch screen has no pointer movement to bring the buttons back. */
+  body.activity.idle .controls,
   body.cinema.idle .controls { opacity: 1; visibility: visible; }
+  body.activity.idle,
   body.cinema.idle { cursor: auto; }
 }
 
@@ -824,6 +859,63 @@ body.cinema.idle { cursor: none; }
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ---------- watch button on tiles ---------- */
+.watch-btn {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  opacity: 0.85;
+  transition: opacity 0.15s, background 0.15s;
+  backdrop-filter: blur(4px);
+  z-index: 10;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+}
+.watch-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.card--tile:hover .watch-btn,
+.card--tile:has(:focus-visible) .watch-btn {
+  opacity: 1;
+}
+.watch-btn:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+.watch-btn.watched {
+  background: rgba(220, 38, 38, 0.8);
+}
+.watch-btn.watched:hover {
+  background: rgba(220, 38, 38, 1);
+}
+
+/* ---------- watched stream playing inside its tile ---------- */
+/* The decorative preview stays underneath until the video track arrives. */
+.tile-media {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  overflow: hidden;
+  border-radius: 0;
+}
+.tile-media video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  background: #000;
+  border: none;
+  outline: none;
 }
 
 /* ---------- breakpoints ---------- */

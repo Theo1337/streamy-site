@@ -11,6 +11,7 @@ export function installLobby() {
   // ---------- icons (Lucide, inlined) ----------
   const icons = {
     eye: '<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/>',
+    eyeOff: '<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/>',
     volume2: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>',
     volumeX: '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" x2="16" y1="9" y2="15"/><line x1="16" x2="22" y1="9" y2="15"/>',
     expand: '<path d="m15 15 6 6"/><path d="m15 9 6-6"/><path d="M21 16v5h-5"/><path d="M21 8V3h-5"/><path d="M3 16v5h5"/><path d="m3 21 6-6"/><path d="M3 8V3h5"/><path d="M9 9 3 3"/>',
@@ -151,12 +152,32 @@ export function installLobby() {
       </div>`;
   }
 
+  function watchButtonHTML(stream) {
+    const isWatched = window.Streamy?.watchedStreams?.has(stream.room) ?? false;
+    return `
+      <button class="watch-btn ${isWatched ? 'watched' : ''}"
+              data-room="${escapeHTML(stream.room || "")}"
+              aria-label="${isWatched ? 'Leave' : 'Watch'} ${escapeHTML(stream.name)}"
+              aria-pressed="${isWatched ? 'true' : 'false'}"
+              title="${isWatched ? 'Leave stream' : 'Watch in multistream'}"
+              data-action="${isWatched ? 'unwatch' : 'watch'}">
+        ${icon(isWatched ? "eyeOff" : "eye", "sm")}
+      </button>`;
+  }
+
   function cardHTML(stream, variant) {
     const isActive = variant === "card--active";
+    const isWatched = !isActive && (window.Streamy?.watchedStreams?.has(stream.room) ?? false);
+    // Demo cards have no real room, so they cannot be watched in place.
+    const watchBtn = !isActive && !stream.isDemo ? watchButtonHTML(stream) : "";
+    const content = isActive
+      ? '<div class="card-media" id="card-media"></div>'
+      : `${tileContentHTML(stream)}${isWatched ? `<div class="tile-media" data-room="${escapeHTML(stream.room || "")}"></div>` : ""}`;
     return `
       <article class="card ${variant}" data-room="${escapeHTML(stream.room || "")}" data-name="${escapeHTML(stream.name)}">
-        ${isActive ? '<div class="card-media" id="card-media"></div>' : tileContentHTML(stream)}
+        ${content}
         ${overlayHTML(stream)}
+        ${watchBtn}
         ${isActive ? controlsHTML(stream) : switchButtonHTML(stream)}
       </article>`;
   }
@@ -256,6 +277,9 @@ export function installLobby() {
     if (nextKey === lastLayoutKey && stage.querySelector(".card")) {
       attachPlayer(active);
       syncControls();
+      syncWatchedTiles();
+      syncWatchButtons();
+      window.Streamy?.syncVideos?.();
       return;
     }
 
@@ -282,6 +306,9 @@ export function installLobby() {
       }
       attachPlayer(active);
       syncControls();
+      syncWatchedTiles();
+      syncWatchButtons();
+      window.Streamy?.syncVideos?.();
       return;
     }
 
@@ -295,6 +322,45 @@ export function installLobby() {
 
     attachPlayer(active);
     syncControls();
+    syncWatchedTiles();
+    syncWatchButtons();
+    window.Streamy?.syncVideos?.();
+  }
+
+  // A watched stream plays inside its own tile. Add/remove the video host
+  // without rebuilding the tile (which would detach the playing <video>).
+  function syncWatchedTiles() {
+    if (!stage) return;
+    const watchedStreams = window.Streamy?.watchedStreams;
+    stage.querySelectorAll(".card--tile").forEach((card) => {
+      const room = card.dataset.room;
+      const isWatched = watchedStreams?.has(room) ?? false;
+      const media = card.querySelector(".tile-media");
+      if (isWatched && !media) {
+        const host = document.createElement("div");
+        host.className = "tile-media";
+        host.dataset.room = room;
+        const overlay = card.querySelector(".overlay");
+        if (overlay) card.insertBefore(host, overlay);
+        else card.appendChild(host);
+      } else if (!isWatched && media) {
+        media.remove();
+      }
+    });
+  }
+
+  function syncWatchButtons() {
+    if (!stage) return;
+    stage.querySelectorAll(".card--tile .watch-btn").forEach((btn) => {
+      const isWatched = window.Streamy?.watchedStreams?.has(btn.dataset.room) ?? false;
+      const name = btn.closest(".card")?.dataset.name || "";
+      btn.classList.toggle("watched", isWatched);
+      btn.dataset.action = isWatched ? "unwatch" : "watch";
+      btn.setAttribute("aria-pressed", isWatched ? "true" : "false");
+      btn.setAttribute("aria-label", `${isWatched ? "Leave" : "Watch"} ${name}`);
+      btn.title = isWatched ? "Leave stream" : "Watch in multistream";
+      btn.innerHTML = icon(isWatched ? "eyeOff" : "eye", "sm");
+    });
   }
 
   // Updates every slider + mute icon in place without interrupting dragging
@@ -347,6 +413,23 @@ export function installLobby() {
     });
 
     stage.addEventListener("click", (e) => {
+      // Handle watch/unwatch button clicks
+      const watchBtn = e.target.closest(".watch-btn");
+      if (watchBtn) {
+        e.stopPropagation();
+        const room = watchBtn.dataset.room;
+        const action = watchBtn.dataset.action;
+        if (action === "watch") {
+          const availableStreams = getAvailableStreams();
+          const stream = availableStreams.find(s => s.room === room);
+          if (stream) window.Streamy?.watchStream?.(stream);
+        } else if (action === "unwatch") {
+          window.Streamy?.unwatchStream?.(room);
+        }
+        render();
+        return;
+      }
+
       // Handle button clicks in controls directly
       if (e.target.closest(".mute-btn")) {
         e.stopPropagation();
@@ -370,7 +453,8 @@ export function installLobby() {
         return;
       }
 
-      // Only clicking an inactive stream tile switches streams
+      // Only clicking an inactive stream tile switches streams.
+      // A tile that is playing in place also becomes the main stream here.
       const tileCard = e.target.closest(".card--tile");
       if (!tileCard) return;
 

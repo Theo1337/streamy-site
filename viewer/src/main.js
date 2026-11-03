@@ -10,6 +10,7 @@ const DEFAULT_ICE_SERVERS = [
 const dom = {
   status: document.querySelector("#status"),
   video: document.querySelector("#video"),
+  canvas: document.querySelector("#canvas"),
   player: document.querySelector("#player"),
   playerHint: document.querySelector("#player-hint"),
   playerHintText: document.querySelector("#player-hint-text"),
@@ -18,7 +19,6 @@ const dom = {
   connect: document.querySelector("#connect"),
   reset: document.querySelector("#reset"),
   copy: document.querySelector("#copy"),
-  message: document.querySelector("#message"),
   manual: document.querySelector("#manual"),
   manualToggle: document.querySelector("#manual-toggle"),
   reconnect: document.querySelector("#reconnect"),
@@ -39,7 +39,10 @@ let currentStreams = [];
 let selectedStream = null;
 let roomCredentials = null;
 let lobbyTimer = null;
-let currentTransport = null;
+
+// Multi-transport state
+const transports = new Map(); // room -> { transport, videoEl, isMain, stream }
+const watchedStreams = new Set(); // room IDs being watched in bottom row
 let manualPeer = null;
 
 const audio = {
@@ -69,7 +72,15 @@ if (dom.video) {
   dom.video.playsInline = true;
 }
 window.addEventListener("beforeunload", () => {
-  currentTransport?.close();
+  // Close all transports and clean up video elements
+  for (const [room, entry] of transports) {
+    try { entry.transport.close(); } catch {}
+    if (entry.videoEl && entry.videoEl.parentElement) {
+      entry.videoEl.remove();
+    }
+  }
+  transports.clear();
+  watchedStreams.clear();
   if (manualPeer) manualPeer.close();
 });
 
@@ -90,26 +101,35 @@ async function init() {
   const directToken = fragment.get("token") || query.get("token");
   const signalURL = fragment.get("signal") || config.signalURL || DEFAULT_SIGNAL_URL;
 
+  let relayRoom = fragment.get("relay") || query.get("relay") || "";
+  if (relayRoom === "1" || query.get("mode") === "relay") relayRoom = directRoom || "";
+
+  if (relayRoom) {
+    // Relay mode removed - fall back to lobby
+    console.warn("Relay mode is no longer supported; showing lobby");
+  }
+
   if (directRoom && directToken) {
-    roomCredentials = {
+    const credentials = {
       room: directRoom,
       token: directToken,
       signalURL,
       iceServers: parseICEServers(fragment.get("ice")),
     };
+    roomCredentials = credentials; // For backward compatibility
     const stream = {
       room: directRoom,
       token: directToken,
       name: "Live Stream",
       avatar: "",
       viewerCount: 1,
-      iceServers: roomCredentials.iceServers,
+      iceServers: credentials.iceServers,
     };
     currentStreams = [stream];
     selectedStream = stream;
     window.Streamy.onStreamsUpdated?.(currentStreams);
     window.Streamy.onSelectedStreamChanged?.(stream);
-    connectWebRTC(stream);
+    connectWebRTC(stream, true, credentials);
     return;
   }
 
@@ -160,69 +180,247 @@ async function loadConfig() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Transports                                                          */
+/* Multi-Transport Management                                          */
 /* ------------------------------------------------------------------ */
 
-function connectWebRTC(stream) {
-  closeTransport();
-  resetPlayerSurface();
-  const credentials = roomCredentials;
+function getOrCreateVideoElement(room, isMain = false) {
+  let entry = transports.get(room);
+  if (entry?.videoEl) return entry.videoEl;
+
+  const videoEl = document.createElement("video");
+  videoEl.playsInline = true;
+  videoEl.muted = true;
+  videoEl.volume = 0;
+  videoEl.autoplay = true;
+  videoEl.dataset.room = room;
+  videoEl.style.width = "100%";
+  videoEl.style.height = "100%";
+  videoEl.style.objectFit = isMain ? "contain" : "cover";
+  videoEl.style.background = "#000";
+
+  if (!entry) {
+    entry = { transport: null, videoEl, isMain: false, stream: null };
+    transports.set(room, entry);
+  } else {
+    entry.videoEl = videoEl;
+  }
+  return videoEl;
+}
+
+function connectWebRTC(stream, isMain = false, credentials) {
   if (!credentials) return;
 
+  // Check if already connected to this room
+  let entry = transports.get(stream.room);
+  if (entry?.transport) {
+    // Already connected, just update isMain flag
+    entry.isMain = isMain;
+    entry.stream = stream;
+    if (isMain) {
+      entry.videoEl.style.objectFit = "contain";
+      moveVideoToMain(entry.videoEl);
+      selectedStream = stream;
+      window.Streamy.onSelectedStreamChanged?.(stream);
+    } else {
+      entry.videoEl.style.objectFit = "cover";
+      attachWatchedVideo(stream.room, entry.videoEl);
+    }
+    applyAudioState();
+    return;
+  }
+
+  const videoEl = getOrCreateVideoElement(stream.room, isMain);
   const transport = new WebRtcTransport({
     room: credentials.room,
     token: credentials.token,
     signalURL: credentials.signalURL,
     iceServers: credentials.iceServers,
   });
-  attachTransport(transport);
-  currentTransport = transport;
+
+  entry = { transport, videoEl, isMain, stream };
+  transports.set(stream.room, entry);
+
+  attachTransport(transport, stream.room);
   void transport.connect();
 
-  if (dom.playerHint) dom.playerHint.hidden = false;
-  if (dom.playerHintText) dom.playerHintText.textContent = `Connecting to ${stream?.name || "stream"}…`;
+  if (isMain) {
+    moveVideoToMain(videoEl);
+    if (dom.playerHint) dom.playerHint.hidden = false;
+    if (dom.playerHintText) dom.playerHintText.textContent = `Connecting to ${stream?.name || "stream"}…`;
+  }
 }
 
-function attachTransport(transport) {
+function attachTransport(transport, room) {
   transport.onStatus((text, state) => {
-    setStatus(text, state);
-    if (dom.playerHintText && state !== "connected") {
-      dom.playerHintText.textContent = hintForStatus(text);
+    // A watched stream may be promoted to the main player after the transport
+    // was created, so read the current role instead of closing over it.
+    const entry = transports.get(room);
+    if (entry?.isMain) {
+      setStatus(text, state);
+      if (dom.playerHintText && state !== "connected") {
+        dom.playerHintText.textContent = hintForStatus(text);
+      }
     }
   });
-  transport.onVideo((value) => showVideo(value));
-  transport.onAudio((value) => handleAudio(value));
+  transport.onVideo((value) => showVideo(room, value));
+  transport.onAudio((value) => handleAudio(value, room));
 }
 
-function closeTransport() {
-  if (currentTransport) {
-    try { currentTransport.close(); } catch {}
-    currentTransport = null;
+function disconnectStream(room) {
+  watchedStreams.delete(room);
+  const entry = transports.get(room);
+  if (entry) {
+    try { entry.transport.close(); } catch {}
+    // Remove video element from DOM
+    if (entry.videoEl && entry.videoEl.parentElement) {
+      entry.videoEl.remove();
+    }
+    transports.delete(room);
+  }
+  // If we disconnected the main stream, clear selection
+  if (selectedStream?.room === room) {
+    selectedStream = null;
+    window.Streamy.onSelectedStreamChanged?.(null);
+    resetPlayerSurface();
+    setStatus(currentStreams.length ? "Select a stream" : "No streams live", "");
   }
 }
 
-function showVideo(value) {
-  if (!value) return;
+function makeMainStream(room) {
+  const entry = transports.get(room);
+  if (!entry) {
+    // Not connected in the bottom row: just select it normally.
+    const stream = currentStreams.find((candidate) => candidate.room === room);
+    if (stream) selectStream(stream);
+    return;
+  }
 
-  if (dom.video) {
-    dom.video.hidden = false;
-    if (value.kind === "stream") {
-      dom.video.srcObject = value.stream;
+  const previous = selectedStream && selectedStream.room !== room
+    ? transports.get(selectedStream.room)
+    : null;
+
+  // The promoted stream is no longer part of the bottom row.
+  watchedStreams.delete(room);
+  entry.isMain = true;
+
+  // Keep the previous main stream playing in the bottom row instead of
+  // dropping its connection when the user enlarges another stream.
+  if (previous && previous.stream?.room && previous.stream.room !== room) {
+    watchedStreams.add(previous.stream.room);
+    previous.isMain = false;
+  }
+
+  for (const [candidateRoom, candidate] of transports) {
+    candidate.isMain = candidateRoom === room;
+  }
+
+  // Move video element to main player
+  moveVideoToMain(entry.videoEl);
+
+  // Update selected stream
+  selectedStream = entry.stream;
+  window.Streamy.onSelectedStreamChanged?.(entry.stream);
+
+  // Update roomCredentials to this stream's credentials for reconnection
+  if (entry.stream) {
+    roomCredentials = {
+      room: entry.stream.room,
+      token: entry.stream.token,
+      signalURL: config.signalURL || DEFAULT_SIGNAL_URL,
+      iceServers: mergeICEServers(DEFAULT_ICE_SERVERS, entry.stream.iceServers || []),
+    };
+  }
+
+  applyAudioState();
+
+  // Update status - the stream is already connected, so show connected
+  setStatus("Connected", "connected");
+  window.Streamy.onStreamsUpdated?.(currentStreams);
+}
+
+function moveVideoToMain(videoEl) {
+  // Put the video element inside the #player container, replacing the static video
+  if (dom.player) {
+    const oldVideo = dom.player.querySelector("video");
+    if (oldVideo && oldVideo !== videoEl) {
+      oldVideo.remove();
     }
-    applyAudioState();
-    const playing = dom.video.play();
-    if (playing && typeof playing.catch === "function") {
-      // Autoplay can be blocked until the first click. The stream is already
-      // attached and the controls remain available, so do not interrupt the
-      // viewer with a "press play" banner.
-      playing.catch(() => {});
+    // Insert videoEl as first child (before player-hint)
+    const hint = dom.player.querySelector("#player-hint");
+    if (hint) {
+      dom.player.insertBefore(videoEl, hint);
+    } else {
+      dom.player.appendChild(videoEl);
     }
+    // Update object-fit for main stream
+    videoEl.style.objectFit = "contain";
   }
   if (dom.playerHint) dom.playerHint.hidden = true;
+  // Apply audio state to main video
+  applyAudioState();
 }
 
-function handleAudio(value) {
+function showVideo(room, value) {
   if (!value) return;
+
+  const entry = transports.get(room);
+  if (!entry) return;
+
+  const videoEl = entry.videoEl;
+  if (!videoEl) return;
+
+  videoEl.hidden = false;
+  if (value.kind === "stream") {
+    videoEl.srcObject = value.stream;
+  }
+
+  // Read the live role so a stream promoted from the bottom row starts playing
+  // in the main player even if its track arrived while it was a thumbnail.
+  if (entry.isMain) {
+    videoEl.style.objectFit = "contain";
+    moveVideoToMain(videoEl);
+    applyAudioState();
+    // Hide the "Connecting..." hint when video starts
+    if (dom.playerHint) dom.playerHint.hidden = true;
+  } else {
+    videoEl.style.objectFit = "cover";
+    // For watched streams, attach video to the watched tile media container
+    attachWatchedVideo(room, videoEl);
+  }
+
+  const playing = videoEl.play();
+  if (playing && typeof playing.catch === "function") {
+    playing.catch(() => {});
+  }
+}
+
+// Attach a watched stream's video element to its tile in the grid
+function attachWatchedVideo(room, videoEl) {
+  if (!videoEl?.srcObject) return;
+  // Find the live tile media container for this room
+  const mediaContainer = document.querySelector(`.tile-media[data-room="${room}"]`);
+  if (!mediaContainer) return;
+
+  // If video is already in the container, do nothing
+  if (mediaContainer.contains(videoEl)) return;
+
+  // Clear any existing content and add the video
+  mediaContainer.replaceChildren(videoEl);
+}
+
+function handleAudio(value, room) {
+  if (!value) return;
+
+  const entry = transports.get(room);
+  if (entry && !entry.isMain) {
+    // A bottom-row preview failing must not hijack the main player's status.
+    if (value.error) {
+      disconnectStream(room);
+      window.Streamy.onStreamsUpdated?.(currentStreams);
+    }
+    return;
+  }
+
   if (value.error) {
     showError(new Error(value.error));
     return;
@@ -233,14 +431,46 @@ function handleAudio(value) {
 }
 
 function resetPlayerSurface() {
-  if (dom.video) {
-    dom.video.srcObject = null;
-    if (dom.video.hasAttribute("src")) {
-      dom.video.removeAttribute("src");
-      try { dom.video.load(); } catch {}
-    }
-    dom.video.hidden = false;
+  if (dom.canvas) {
+    dom.canvas.hidden = true;
+    const context = dom.canvas.getContext("2d");
+    context?.clearRect(0, 0, dom.canvas.width, dom.canvas.height);
   }
+  // Clean up the player container - remove any dynamic video elements, restore static video
+  if (dom.player) {
+    const videos = dom.player.querySelectorAll("video");
+    for (const video of videos) {
+      video.srcObject = null;
+      if (video.hasAttribute("src")) {
+        video.removeAttribute("src");
+        try { video.load(); } catch {}
+      }
+      // Remove dynamic video elements (those with data-room attribute)
+      if (video.dataset.room) {
+        video.remove();
+      }
+    }
+    // Ensure static video element exists in player
+    if (!dom.player.querySelector("#video")) {
+      const staticVideo = document.createElement("video");
+      staticVideo.id = "video";
+      staticVideo.playsInline = true;
+      staticVideo.muted = true;
+      staticVideo.volume = 0;
+      staticVideo.autoplay = true;
+      staticVideo.hidden = false;
+      const hint = dom.player.querySelector("#player-hint");
+      if (hint) {
+        dom.player.insertBefore(staticVideo, hint);
+      } else {
+        dom.player.appendChild(staticVideo);
+      }
+      // Update dom.video reference
+      dom.video = staticVideo;
+      setMediaElement(dom.video);
+    }
+  }
+  if (dom.video) dom.video.hidden = false;
   if (dom.playerHint) dom.playerHint.hidden = false;
 }
 
@@ -319,6 +549,13 @@ function applyLobbyStreams(streams) {
   const nextRooms = validStreams.map((stream) => stream.room).join("\n");
   currentStreams = validStreams;
 
+  // Drop bottom-row previews whose stream went offline.
+  for (const room of [...watchedStreams]) {
+    if (!validStreams.some((stream) => stream.room === room)) {
+      disconnectStream(room);
+    }
+  }
+
   if (dom.count) {
     dom.count.textContent = `${validStreams.length} live stream${validStreams.length === 1 ? "" : "s"}`;
   }
@@ -334,7 +571,8 @@ function applyLobbyStreams(streams) {
       selectedStream = latest;
       window.Streamy.onStreamMetadataChanged?.(latest);
     } else if (!selectedStream.isDemo) {
-      deselectStream();
+      // Only the main stream is gone; bottom-row previews keep playing.
+      disconnectStream(selectedStream.room);
       setStatus(validStreams.length ? "Select a stream" : "No streams live", "");
     }
   } else if (validStreams.length > 0 && !manualMode) {
@@ -355,21 +593,47 @@ function selectStream(stream) {
     return;
   }
 
+  const previous = selectedStream;
   selectedStream = stream;
   if (stream.isDemo) {
-    closeTransport();
+    // Close all transports when switching to demo
+    for (const [room, entry] of transports) {
+      try { entry.transport.close(); } catch {}
+      if (entry.videoEl && entry.videoEl.parentElement) {
+        entry.videoEl.remove();
+      }
+    }
+    transports.clear();
+    watchedStreams.clear();
     resetPlayerSurface();
     setStatus("Demo stream", "");
     window.Streamy.onSelectedStreamChanged?.(stream);
     return;
   }
 
-  roomCredentials = {
+  // Selecting a stream makes it the main player, so it leaves the bottom row.
+  watchedStreams.delete(stream.room);
+
+  const credentials = {
     room: stream.room,
     token: stream.token,
     signalURL: config.signalURL || DEFAULT_SIGNAL_URL,
     iceServers: mergeICEServers(DEFAULT_ICE_SERVERS, stream.iceServers || []),
   };
+
+  roomCredentials = credentials; // Keep for backward compatibility with manual mode
+
+  // Stop the stream that used to be main. Bottom-row streams stay connected.
+  if (previous && previous.room && previous.room !== stream.room && !watchedStreams.has(previous.room)) {
+    const previousEntry = transports.get(previous.room);
+    if (previousEntry) {
+      try { previousEntry.transport.close(); } catch {}
+      if (previousEntry.videoEl && previousEntry.videoEl.parentElement) {
+        previousEntry.videoEl.remove();
+      }
+      transports.delete(previous.room);
+    }
+  }
 
   audio.muted = true;
   applyAudioState();
@@ -377,11 +641,19 @@ function selectStream(stream) {
   showMessage("");
 
   window.Streamy.onSelectedStreamChanged?.(stream);
-  connectWebRTC(stream);
+  connectWebRTC(stream, true, credentials);
 }
 
 function deselectStream() {
-  closeTransport();
+  // Close all transports and clean up video elements
+  for (const [room, entry] of transports) {
+    try { entry.transport.close(); } catch {}
+    if (entry.videoEl && entry.videoEl.parentElement) {
+      entry.videoEl.remove();
+    }
+  }
+  transports.clear();
+  watchedStreams.clear();
   resetPlayerSurface();
   selectedStream = null;
   window.Streamy.onSelectedStreamChanged?.(null);
@@ -400,6 +672,7 @@ function installGlobalApi() {
     get volume() { return audio.muted ? 0 : Math.round(audio.volume * 100); },
     get muted() { return audio.muted; },
     get isCinema() { return document.body.classList.contains("cinema"); },
+    get watchedStreams() { return watchedStreams; },
 
     getPlayerElement: () => dom.player,
     getVideoElement: () => dom.video,
@@ -418,6 +691,42 @@ function installGlobalApi() {
     setStreams: (streams) => {
       currentStreams = streams;
       window.Streamy.onStreamsUpdated?.(currentStreams);
+    },
+
+    // Multistream API
+    watchStream: (stream) => {
+      if (!stream || !stream.room || stream.isDemo) return;
+      // Already the main stream, or already in the bottom row.
+      if (selectedStream?.room === stream.room) return;
+      if (watchedStreams.has(stream.room)) return;
+      watchedStreams.add(stream.room);
+      const credentials = {
+        room: stream.room,
+        token: stream.token,
+        signalURL: config.signalURL || DEFAULT_SIGNAL_URL,
+        iceServers: mergeICEServers(DEFAULT_ICE_SERVERS, stream.iceServers || []),
+      };
+      connectWebRTC(stream, false, credentials);
+      window.Streamy.onStreamsUpdated?.(currentStreams);
+    },
+    unwatchStream: (room) => {
+      if (!room || selectedStream?.room === room) return;
+      disconnectStream(room);
+      window.Streamy.onStreamsUpdated?.(currentStreams);
+    },
+    makeMainStream: (room) => {
+      makeMainStream(room);
+    },
+    // Re-attach existing <video> elements after the stage was re-rendered.
+    syncVideos: () => {
+      for (const [room, entry] of transports) {
+        if (!entry.videoEl || entry.isMain || !entry.videoEl.srcObject) continue;
+        entry.videoEl.style.objectFit = "cover";
+        const media = document.querySelector(`.tile-media[data-room="${room}"]`);
+        if (media && !media.contains(entry.videoEl)) {
+          media.replaceChildren(entry.videoEl);
+        }
+      }
     },
 
     onStreamsUpdated: null,
@@ -512,12 +821,18 @@ function toggleMute() {
 }
 
 function applyAudioState() {
+  // Apply to main video element
   if (dom.video) {
     dom.video.muted = audio.muted;
     dom.video.volume = audio.muted ? 0 : audio.volume;
   }
-  currentTransport?.setVolume?.(audio.volume);
-  currentTransport?.setMuted?.(audio.muted);
+  // Only the main stream is audible; the bottom-row previews stay muted.
+  for (const [, entry] of transports) {
+    if (!entry.videoEl) continue;
+    const isMain = entry.isMain;
+    entry.videoEl.muted = isMain ? audio.muted : true;
+    entry.videoEl.volume = isMain && !audio.muted ? audio.volume : 0;
+  }
 }
 
 function notifyAudioChange() {
@@ -583,7 +898,15 @@ function toggleManual(forceState) {
   if (dom.manualToggle) dom.manualToggle.classList.toggle("active", manualMode);
 
   if (manualMode) {
-    closeTransport();
+    // Close all transports when entering manual mode
+    for (const [room, entry] of transports) {
+      try { entry.transport.close(); } catch {}
+      if (entry.videoEl && entry.videoEl.parentElement) {
+        entry.videoEl.remove();
+      }
+    }
+    transports.clear();
+    watchedStreams.clear();
     setStatus("Manual test", "");
     if (dom.manualPreviewBody && dom.player) dom.manualPreviewBody.appendChild(dom.player);
     if (dom.playerHint) dom.playerHint.hidden = false;
@@ -739,13 +1062,17 @@ function reconnect() {
     resetManual();
     return;
   }
-  if (!currentTransport) {
-    if (selectedStream && roomCredentials) connectWebRTC(selectedStream);
-    return;
+  if (!selectedStream || !roomCredentials) return;
+
+  // Drop the old connection so connectWebRTC creates a fresh transport.
+  const entry = transports.get(selectedStream.room);
+  if (entry) {
+    try { entry.transport.close(); } catch {}
+    if (entry.videoEl) entry.videoEl.srcObject = null;
+    transports.delete(selectedStream.room);
   }
-  const transport = currentTransport;
-  if (typeof transport.reconnect === "function") void transport.reconnect();
-  else void transport.connect();
+
+  connectWebRTC(selectedStream, true, roomCredentials);
 }
 
 function parseICEServers(encoded) {
@@ -818,3 +1145,11 @@ function connectionLabel(state) {
     default: return "Negotiating";
   }
 }
+
+// Legacy single transport reference for backward compatibility
+let currentTransport = null;
+Object.defineProperty(window, 'currentTransport', {
+  get() {
+    return selectedStream ? transports.get(selectedStream.room)?.transport : null;
+  }
+});

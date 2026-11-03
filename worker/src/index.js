@@ -2,12 +2,25 @@ import { isValidRoomID, jsonResponse, allowedOrigin, randomID } from "./protocol
 import { Room } from "./room.js";
 import { issueIdentityToken, validLoopbackCallback } from "./identity.js";
 import { Lobby } from "./lobby.js";
+import { isTunnelPath, proxyToTunnel } from "./tunnel.js";
 
 export { Lobby, Room };
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // Discord's Activity proxy sends /.proxy/api/token here as /token. The
+    // Worker already owns the client secret, so the code exchange happens at
+    // the edge instead of depending on the local bot being reachable.
+    if (url.pathname === "/token" || url.pathname === "/api/token") {
+      return exchangeActivityToken(request, env);
+    }
+    if (isTunnelPath(url.pathname)) {
+      return proxyToTunnel(request, env, url);
+    }
+    if (url.pathname === "/__tunnel") {
+      return handleTunnelAdmin(request, env);
+    }
     if (url.pathname === "/v1/lobby") {
       if (!allowedOrigin(request.headers.get("Origin"), env.VIEWER_ORIGINS || "")) {
         return jsonResponse({ error: "origin-not-allowed" }, 403);
@@ -63,6 +76,104 @@ export default {
     return env.ROOMS.get(roomIDObject).fetch(request);
   },
 };
+
+// Lets the local start script publish "this is the tunnel serving the relay
+// right now" without anyone touching the Developer Portal. The tunnel hostname
+// is the only thing that changes between runs, and it is stored in the Lobby
+// Durable Object so lookups are immediately consistent.
+async function handleTunnelAdmin(request, env) {
+  const expected = env.TUNNEL_ADMIN_TOKEN || "";
+  if (!expected) return jsonResponse({ error: "admin-not-configured" }, 503);
+  const provided = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (!constantTimeEqual(provided, expected)) return jsonResponse({ error: "unauthorized" }, 401);
+
+  const lobby = env.LOBBY.get(env.LOBBY.idFromName("public"));
+  if (request.method === "GET") {
+    const response = await lobby.fetch("https://lobby/tunnel");
+    return jsonResponse(await response.json(), 200, { "cache-control": "no-store" });
+  }
+  if (request.method === "PUT") {
+    const response = await lobby.fetch("https://lobby/tunnel", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: await request.text(),
+    });
+    if (response.ok) return jsonResponse({ ok: true }, 200);
+    return jsonResponse({ error: "invalid-host" }, response.status);
+  }
+  if (request.method === "DELETE") {
+    await lobby.fetch("https://lobby/tunnel", { method: "DELETE" });
+    return jsonResponse({ ok: true }, 200);
+  }
+  return jsonResponse({ error: "method-not-allowed" }, 405, { allow: "GET, PUT, DELETE" });
+}
+
+function constantTimeEqual(left, right) {
+  if (typeof left !== "string" || typeof right !== "string" || left.length !== right.length) return false;
+  let diff = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    diff |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return diff === 0;
+}
+
+// Discord Embedded App SDK code exchange. The SDK returns a short-lived code
+// from commands.authorize(); the Activity then authenticates with the access
+// token. No redirect_uri is sent: the code was issued to the embedded app, not
+// to a browser redirect, and Discord rejects a mismatched redirect_uri.
+async function exchangeActivityToken(request, env) {
+  const origin = request.headers.get("Origin") || "";
+  const cors = origin
+    ? {
+        "access-control-allow-origin": origin,
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "Content-Type",
+        "vary": "Origin",
+      }
+    : {};
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: cors });
+  }
+  if (request.method !== "POST") {
+    return jsonResponse({ error: "method-not-allowed" }, 405, { ...cors, allow: "POST, OPTIONS" });
+  }
+  if (!env.DISCORD_CLIENT_ID || !env.DISCORD_CLIENT_SECRET) {
+    return jsonResponse({ error: "discord-not-configured" }, 503, cors);
+  }
+
+  let input;
+  try {
+    input = await request.json();
+  } catch {
+    return jsonResponse({ error: "invalid-json" }, 400, cors);
+  }
+  const code = typeof input?.code === "string" ? input.code.trim() : "";
+  if (!code || code.length > 2048) {
+    return jsonResponse({ error: "code is required" }, 400, cors);
+  }
+
+  const tokenBody = new URLSearchParams({
+    client_id: env.DISCORD_CLIENT_ID,
+    client_secret: env.DISCORD_CLIENT_SECRET,
+    grant_type: "authorization_code",
+    code,
+  });
+  const tokenResponse = await fetch("https://discord.com/api/oauth2/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: tokenBody,
+  });
+  if (!tokenResponse.ok) {
+    const detail = await tokenResponse.text().catch(() => "");
+    console.error("Discord Activity token exchange failed", tokenResponse.status, detail);
+    return jsonResponse({ error: "token exchange failed" }, 502, cors);
+  }
+  const tokenData = await tokenResponse.json();
+  if (!tokenData.access_token) {
+    return jsonResponse({ error: "token exchange returned no access_token" }, 502, cors);
+  }
+  return jsonResponse({ access_token: tokenData.access_token }, 200, { ...cors, "cache-control": "no-store" });
+}
 
 async function startDiscordOAuth(request, env, url) {
   if (request.method !== "POST") {
@@ -139,9 +250,8 @@ async function finishDiscordOAuth(request, env, url) {
     body: tokenBody,
   });
   if (!tokenResponse.ok) {
-    const errText = await tokenResponse.text();
-    console.error("Discord token exchange failed", tokenResponse.status, errText);
-    return new Response(`Discord sign-in failed: ${errText}`, { status: 502 });
+    console.error("Discord token exchange failed", tokenResponse.status);
+    return new Response("Discord sign-in failed. Return to Streamy and try again.", { status: 502 });
   }
   const tokenData = await tokenResponse.json();
   const userResponse = await fetch("https://discord.com/api/users/@me", {
