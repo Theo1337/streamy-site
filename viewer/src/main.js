@@ -1,5 +1,7 @@
 import { installLobby } from "./lobby.js";
 import { setMediaElement, WebRtcTransport } from "./transports/webrtc.js";
+import { isActivity, bootstrapActivity } from "./activity.js";
+import { WebSocketTransport } from "./transports/websocket.js";
 
 const DEFAULT_SIGNAL_URL = "wss://streamy-signal.thenightserver.workers.dev";
 const DEFAULT_ICE_SERVERS = [
@@ -39,6 +41,12 @@ let currentStreams = [];
 let selectedStream = null;
 let roomCredentials = null;
 let lobbyTimer = null;
+
+// Activity mode state
+let activityMode = false;
+let activityRoom = null;
+let activityToken = null;
+let activityTransport = null;
 
 // Multi-transport state
 const transports = new Map(); // room -> { transport, videoEl, isMain, stream }
@@ -82,14 +90,33 @@ window.addEventListener("beforeunload", () => {
   transports.clear();
   watchedStreams.clear();
   if (manualPeer) manualPeer.close();
+  if (activityTransport) {
+    try { activityTransport.close(); } catch {}
+    activityTransport = null;
+  }
 });
 
 /* ------------------------------------------------------------------ */
 /* Startup                                                             */
 /* ------------------------------------------------------------------ */
 
+// Debug logging helper
+function log(...args) {
+  const timestamp = new Date().toISOString();
+  console.log(`[Streamy:${timestamp}]`, ...args);
+}
+
 async function init() {
+  log("init() starting");
   await loadConfig();
+  log("config loaded:", config);
+
+  // Check if running as Discord Activity
+  if (isActivity()) {
+    log("Activity mode detected");
+    await initActivity();
+    return;
+  }
 
   if (manualMode) {
     toggleManual(true);
@@ -105,8 +132,20 @@ async function init() {
   if (relayRoom === "1" || query.get("mode") === "relay") relayRoom = directRoom || "";
 
   if (relayRoom) {
-    // Relay mode removed - fall back to lobby
-    console.warn("Relay mode is no longer supported; showing lobby");
+    const stream = {
+      room: relayRoom,
+      name: "Relay stream",
+      avatar: "",
+      viewerCount: 1,
+      isRelay: true,
+    };
+    currentStreams = [stream];
+    selectedStream = stream;
+    roomCredentials = { room: relayRoom, relay: true };
+    window.Streamy.onStreamsUpdated?.(currentStreams);
+    window.Streamy.onSelectedStreamChanged?.(stream);
+    connectActivityRelay(stream);
+    return;
   }
 
   if (directRoom && directToken) {
@@ -134,6 +173,77 @@ async function init() {
   }
 
   void startLobby();
+}
+
+async function initActivity() {
+  // An Activity is only ever one stream, and Discord already draws the frame
+  // around it. Everything except the picture and the video controls is noise,
+  // so the page starts in its player-only layout.
+  activityMode = true;
+  document.body.classList.add("activity");
+  setStatus("Starting Discord Activity", "pending");
+  if (dom.playerHintText) dom.playerHintText.textContent = "Connecting to Discord…";
+
+  let result;
+  try {
+    result = await bootstrapActivity(config);
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  if (!result) {
+    showError(new Error("This page is not running inside a Discord Activity."));
+    return;
+  }
+
+  activityRoom = result.room;
+  const stream = {
+    room: activityRoom,
+    name: "Discord Activity",
+    avatar: "",
+    viewerCount: 1,
+    isActivity: true,
+  };
+  currentStreams = [stream];
+  selectedStream = stream;
+  roomCredentials = { room: activityRoom, relay: true };
+  window.Streamy.onStreamsUpdated?.(currentStreams);
+  window.Streamy.onSelectedStreamChanged?.(stream);
+  connectActivityRelay(stream);
+}
+
+// connectActivityRelay mirrors the desktop viewer's relay path: one
+// WebSocketTransport drawing into the shared WebCodecs canvas (or the video
+// element in MSE fallback), with the same status/audio plumbing as WebRTC.
+function connectActivityRelay(stream) {
+  const room = stream.room;
+  if (activityTransport) {
+    try { activityTransport.close(); } catch {}
+    activityTransport = null;
+  }
+  resetPlayerSurface();
+  setStatus("Connecting to the relay", "pending");
+  if (dom.playerHint) dom.playerHint.hidden = false;
+  if (dom.playerHintText) dom.playerHintText.textContent = "Waiting for the host to go live…";
+
+  // The Activity has exactly one stream, so decode into the player's own
+  // <video> and canvas. The lobby render already moved #player into the active
+  // card; a second dynamic video would leave the playback controls pointing at
+  // a detached element.
+  const videoEl = dom.video || getOrCreateVideoElement(room, true);
+  const transport = new WebSocketTransport({
+    room,
+    relayURL: "", // activity mode builds a relative /.proxy/relay URL
+    canvas: dom.canvas,
+    video: videoEl,
+    activity: true,
+  });
+  activityTransport = transport;
+  transports.set(room, { transport, videoEl, isMain: true, stream });
+
+  attachTransport(transport, room);
+  moveVideoToMain(videoEl);
+  void transport.connect();
 }
 
 async function loadConfig() {
@@ -368,6 +478,31 @@ function showVideo(room, value) {
 
   const videoEl = entry.videoEl;
   if (!videoEl) return;
+
+  // The relay transport decodes with WebCodecs into the shared canvas and only
+  // falls back to MSE on the video element. Both are the picture.
+  if (value.kind === "canvas") {
+    videoEl.srcObject = null;
+    videoEl.pause();
+    videoEl.hidden = true;
+    const canvas = value.canvas || dom.canvas;
+    if (canvas) {
+      canvas.style.width = "100%";
+      canvas.style.height = "100%";
+      canvas.style.objectFit = "contain";
+      canvas.style.background = "#000";
+      canvas.hidden = false;
+    }
+    if (entry.isMain) {
+      videoEl.style.objectFit = "contain";
+      moveVideoToMain(videoEl);
+      applyAudioState();
+    }
+    if (dom.playerHint) dom.playerHint.hidden = true;
+    return;
+  }
+
+  if (dom.canvas) dom.canvas.hidden = true;
 
   videoEl.hidden = false;
   if (value.kind === "stream") {
@@ -669,6 +804,7 @@ function installGlobalApi() {
     get streams() { return currentStreams; },
     get selectedStream() { return selectedStream; },
     get isManual() { return manualMode; },
+    get isActivity() { return activityMode; },
     get volume() { return audio.muted ? 0 : Math.round(audio.volume * 100); },
     get muted() { return audio.muted; },
     get isCinema() { return document.body.classList.contains("cinema"); },
@@ -827,11 +963,16 @@ function applyAudioState() {
     dom.video.volume = audio.muted ? 0 : audio.volume;
   }
   // Only the main stream is audible; the bottom-row previews stay muted.
+  // The relay transport decodes audio into a Web Audio graph rather than the
+  // video element, so it needs the same state pushed into it explicitly.
   for (const [, entry] of transports) {
-    if (!entry.videoEl) continue;
     const isMain = entry.isMain;
-    entry.videoEl.muted = isMain ? audio.muted : true;
-    entry.videoEl.volume = isMain && !audio.muted ? audio.volume : 0;
+    if (entry.videoEl) {
+      entry.videoEl.muted = isMain ? audio.muted : true;
+      entry.videoEl.volume = isMain && !audio.muted ? audio.volume : 0;
+    }
+    entry.transport?.setVolume?.(isMain ? audio.volume : 0);
+    entry.transport?.setMuted?.(isMain ? audio.muted : true);
   }
 }
 

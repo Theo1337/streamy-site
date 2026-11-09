@@ -2,5 +2,6 @@
   "signalURL": "wss://streamy-signal.thenightserver.workers.dev",
   "relayURL": "",
   "tokenURL": "/.proxy/api/token",
-  "downloadURL": "https://github.com/Theo1337/streamy-app/releases"
+  "downloadURL": "https://github.com/Theo1337/streamy-app/releases",
+  "discordClientID": "1539962249718792203"
 }

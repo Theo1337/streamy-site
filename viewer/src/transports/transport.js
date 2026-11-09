@@ -1,8 +1,9 @@
 /**
- * The player talks to a transport, never to WebRTC directly.
+ * The player talks to one of these, never to WebRTC or the relay directly.
  * Implementations emit:
  *   onVideo({ kind: "stream", stream })       browser WebRTC
- *   onVideo({ kind: "element", element })     media element fallback
+ *   onVideo({ kind: "canvas", canvas })       decoded WebCodecs frames
+ *   onVideo({ kind: "element", element })     MSE fallback on the shared <video>
  *   onStatus(text, state)
  *   onAudio({ sampleRate, channels })
  */
